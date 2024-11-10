@@ -1,16 +1,18 @@
 import os
 import sys
-import json
 import torch
 import torch.nn as nn
 import torchvision.transforms as transforms
 import pytorch_lightning as pl
 from pytorch_lightning import Trainer
+from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.callbacks import ModelCheckpoint, Callback
 from PIL import Image
 from torch.utils.data import random_split, DataLoader
 import argparse
+import json
 
-# Load configuration (except num_classes)
+# Load configuration
 with open('config.json', 'r') as f:
     config = json.load(f)
 
@@ -19,11 +21,9 @@ learning_rate = config.get('learning_rate', 0.001)
 num_epochs = config.get('num_epochs', 10)
 image_size = config.get('image_size', 224)
 validation_split = config.get('validation_split', 0.2)
-# Remove num_classes from config
 
 # Global variable to store label mapping
 label_map = {}
-# Reverse mapping from index to label for prediction
 idx_to_label = {}
 
 # Define custom dataset
@@ -90,8 +90,9 @@ class ImageClassifier(pl.LightningModule):
         outputs = self(images)
         loss = self.criterion(outputs, labels)
         acc = (outputs.argmax(dim=1) == labels).float().mean()
-        self.log('train_loss', loss, on_step=False, on_epoch=True)
-        self.log('train_acc', acc, on_step=False, on_epoch=True)
+        # Log training loss and accuracy
+        self.log('train_loss', loss, prog_bar=True, on_epoch=True)
+        self.log('train_acc', acc, prog_bar=True, on_epoch=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -99,8 +100,9 @@ class ImageClassifier(pl.LightningModule):
         outputs = self(images)
         loss = self.criterion(outputs, labels)
         acc = (outputs.argmax(dim=1) == labels).float().mean()
-        self.log('val_loss', loss, on_step=False, on_epoch=True)
-        self.log('val_acc', acc, on_step=False, on_epoch=True)
+        # Log validation loss and accuracy
+        self.log('val_loss', loss, prog_bar=True, on_epoch=True)
+        self.log('val_acc', acc, prog_bar=True, on_epoch=True)
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
@@ -135,6 +137,15 @@ def prepare_dataset():
             img_labels.append(label)
     return img_paths, img_labels
 
+# Custom callback to print validation metrics
+class PrintValidationMetricsCallback(Callback):
+    def on_validation_epoch_end(self, trainer, pl_module):
+        val_loss = trainer.callback_metrics.get('val_loss')
+        val_acc = trainer.callback_metrics.get('val_acc')
+        epoch = trainer.current_epoch
+        if val_loss is not None and val_acc is not None:
+            print(f"Epoch {epoch+1}: val_loss={val_loss:.4f}, val_acc={val_acc:.4f}")
+
 def train_model():
     # Get number of classes and label mappings
     num_classes = get_label_mappings('./train')
@@ -153,28 +164,48 @@ def train_model():
     train_size = total_size - val_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
-    # Prepare DataLoaders
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    # Set num_workers=11 in DataLoaders
+    num_workers = 11
+
+    # Prepare DataLoaders with num_workers
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers
+    )
 
     # Initialize model
     model = ImageClassifier(num_classes=num_classes, learning_rate=learning_rate)
 
-    # Load existing checkpoint if available
-    checkpoint_path = 'weights.ckpt'
-    if os.path.exists(checkpoint_path):
-        print(f"Loading model from checkpoint '{checkpoint_path}'")
-        model = ImageClassifier.load_from_checkpoint(checkpoint_path, num_classes=num_classes, learning_rate=learning_rate)
+    # Initialize TensorBoard logger
+    logger = TensorBoardLogger("tb_logs", name="classify_model")
 
-    # Initialize trainer with checkpointing
-    checkpoint_callback = pl.callbacks.ModelCheckpoint(
+    # Initialize checkpoint callback
+    checkpoint_callback = ModelCheckpoint(
         dirpath='.',
         filename='weights',
         save_top_k=1,
         monitor='val_acc',
         mode='max'
     )
-    trainer = Trainer(max_epochs=num_epochs, callbacks=[checkpoint_callback])
+
+    # Initialize custom callback
+    print_callback = PrintValidationMetricsCallback()
+
+    # Initialize trainer with callbacks
+    trainer = Trainer(
+        max_epochs=num_epochs,
+        callbacks=[checkpoint_callback, print_callback],
+        logger=logger,
+        enable_progress_bar=True,
+    )
 
     # Train the model
     trainer.fit(model, train_loader, val_loader)
@@ -234,4 +265,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
