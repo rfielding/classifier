@@ -1,0 +1,6 @@
+lightning_logs/
+test1/
+train/
+weights.ckpt
+weights.data
+
