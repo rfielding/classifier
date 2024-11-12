@@ -1,7 +1,7 @@
 {
     "batch_size": 64,
     "learning_rate": 0.001,
-    "num_epochs": 10,
+    "num_epochs": 100,
     "image_size": 224,
     "validation_split": 0.2,
     "num_workers": 11

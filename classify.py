@@ -41,7 +41,6 @@ class CustomImageDataset(torch.utils.data.Dataset):
             image = Image.open(self.img_paths[idx]).convert('RGB')
         except Exception as e:
             print(f"Error loading image {self.img_paths[idx]}: {e}")
-            # Return a dummy image and label
             image = Image.new('RGB', (image_size, image_size))
             label = 0
         else:
@@ -54,31 +53,59 @@ class CustomImageDataset(torch.utils.data.Dataset):
 transform = transforms.Compose([
     transforms.Resize((image_size, image_size)),
     transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406],   # Mean for ImageNet
-                         [0.229, 0.224, 0.225])   # Std for ImageNet
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])  # Mean and std for ImageNet
 ])
 
-# Define the model architecture
-class ImageClassifier(pl.LightningModule):
+class DeeperImageClassifier(pl.LightningModule):
     def __init__(self, num_classes, learning_rate):
-        super(ImageClassifier, self).__init__()
+        super(DeeperImageClassifier, self).__init__()
         self.learning_rate = learning_rate
         self.num_classes = num_classes
         self.model = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(16),
-            nn.ReLU(),
-            nn.MaxPool2d(2,2),
-
-            nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.MaxPool2d(2,2),
+            nn.MaxPool2d(2, 2),
+
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+
+            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+
+            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+
+            nn.Conv2d(256, 512, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+
+            nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
 
             nn.Flatten(),
-            nn.Linear(32 * (image_size // 4) * (image_size // 4), 128),
+            nn.Linear(512 * (image_size // 64) * (image_size // 64), 1024),
             nn.ReLU(),
-            nn.Linear(128, num_classes)
+            nn.Dropout(0.5),
+
+            nn.Linear(1024, 512),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+
+            nn.Linear(256, num_classes)
         )
         self.criterion = nn.CrossEntropyLoss()
 
@@ -90,7 +117,6 @@ class ImageClassifier(pl.LightningModule):
         outputs = self(images)
         loss = self.criterion(outputs, labels)
         acc = (outputs.argmax(dim=1) == labels).float().mean()
-        # Log training loss and accuracy
         self.log('train_loss', loss, prog_bar=True, on_epoch=True)
         self.log('train_acc', acc, prog_bar=True, on_epoch=True)
         return loss
@@ -100,13 +126,11 @@ class ImageClassifier(pl.LightningModule):
         outputs = self(images)
         loss = self.criterion(outputs, labels)
         acc = (outputs.argmax(dim=1) == labels).float().mean()
-        # Log validation loss and accuracy
         self.log('val_loss', loss, prog_bar=True, on_epoch=True)
         self.log('val_acc', acc, prog_bar=True, on_epoch=True)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
-        return optimizer
+        return torch.optim.Adam(self.parameters(), lr=self.learning_rate)
 
 def get_label_mappings(img_dir):
     global label_map, idx_to_label
@@ -115,12 +139,10 @@ def get_label_mappings(img_dir):
         if filename.endswith('.jpg') or filename.endswith('.png'):
             label_str = filename.split('.')[0]
             label_set.add(label_str)
-    # Sort labels lexically and assign indices
     sorted_labels = sorted(label_set)
     label_map = {label: idx for idx, label in enumerate(sorted_labels)}
     idx_to_label = {idx: label for label, idx in label_map.items()}
-    num_classes = len(label_map)
-    return num_classes
+    return len(label_map)
 
 def prepare_dataset():
     img_paths = []
@@ -131,10 +153,8 @@ def prepare_dataset():
             label_str = filename.split('.')[0]
             if label_str in label_map:
                 label = label_map[label_str]
-            else:
-                continue  # Skip unknown labels
-            img_paths.append(filepath)
-            img_labels.append(label)
+                img_paths.append(filepath)
+                img_labels.append(label)
     return img_paths, img_labels
 
 # Custom callback to print validation metrics
@@ -144,104 +164,55 @@ class PrintValidationMetricsCallback(Callback):
         val_acc = trainer.callback_metrics.get('val_acc')
         epoch = trainer.current_epoch
         if val_loss is not None and val_acc is not None:
-            print(f"Epoch {epoch+1}: val_loss={val_loss:.4f}, val_acc={val_acc:.4f}")
+            print(f"Epoch {epoch+1}: val_acc={val_acc:.4f}")
 
 def train_model():
-    # Get number of classes and label mappings
     num_classes = get_label_mappings('./train')
-    if num_classes == 0:
-        print("No valid images found in './train' directory for training.")
-        sys.exit(1)
-
     img_paths, img_labels = prepare_dataset()
-
-    # Create dataset
     dataset = CustomImageDataset(img_paths, img_labels, transform=transform)
-
-    # Split into training and validation sets
     total_size = len(dataset)
     val_size = int(validation_split * total_size)
     train_size = total_size - val_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
-
-    # Set num_workers=11 in DataLoaders
     num_workers = 11
 
-    # Prepare DataLoaders with num_workers
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers
-    )
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
-    # Initialize model
-    model = ImageClassifier(num_classes=num_classes, learning_rate=learning_rate)
-
-    # Initialize TensorBoard logger
+    model = DeeperImageClassifier(num_classes=num_classes, learning_rate=learning_rate)
     logger = TensorBoardLogger("tb_logs", name="classify_model")
 
-    # Initialize checkpoint callback
-    checkpoint_callback = ModelCheckpoint(
-        dirpath='.',
-        filename='weights',
-        save_top_k=1,
-        monitor='val_acc',
-        mode='max'
-    )
-
-    # Initialize custom callback
     print_callback = PrintValidationMetricsCallback()
-
-    # Initialize trainer with callbacks
     trainer = Trainer(
         max_epochs=num_epochs,
-        callbacks=[checkpoint_callback, print_callback],
+        callbacks=[print_callback],
         logger=logger,
         enable_progress_bar=True,
     )
 
-    # Train the model
     trainer.fit(model, train_loader, val_loader)
 
-    print("Training complete. Model weights saved to 'weights.ckpt'.")
+    torch.save(model, "full_model.pth")
+    print("Training complete. Entire model saved to 'full_model.pth'.")
 
 def predict_image(image_path):
-    # Get label mappings (needed for idx_to_label)
     num_classes = get_label_mappings('./train')
-    if num_classes == 0:
-        print("No valid labels found. Please train the model first.")
+    model_path = "full_model.pth"
+    if not os.path.exists(model_path):
+        print(f"No model file found at '{model_path}'. Please train the model first using '-train' flag.")
         sys.exit(1)
 
-    # Initialize model
-    model = ImageClassifier(num_classes=num_classes, learning_rate=learning_rate)
-
-    # Load model weights
-    checkpoint_path = 'weights.ckpt'
-    if not os.path.exists(checkpoint_path):
-        print(f"No checkpoint found at '{checkpoint_path}'. Please train the model first using '-train' flag.")
-        sys.exit(1)
-
-    model = ImageClassifier.load_from_checkpoint(checkpoint_path, num_classes=num_classes, learning_rate=learning_rate)
+    model = torch.load(model_path)
     model.eval()
 
-    # Load and preprocess the image
     image = Image.open(image_path).convert('RGB')
     image = transform(image)
-    image = image.unsqueeze(0)  # Add batch dimension
+    image = image.unsqueeze(0)
 
-    # Predict
     with torch.no_grad():
         outputs = model(image)
         _, predicted = torch.max(outputs.data, 1)
 
-    # Map numeric prediction to label
     predicted_label = idx_to_label.get(predicted.item(), 'Unknown')
     print(f"Predicted label: {predicted_label}")
 
@@ -265,3 +236,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
